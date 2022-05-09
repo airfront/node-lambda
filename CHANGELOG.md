@@ -429,3 +429,24 @@ This project adheres to [Semantic Versioning](http://semver.org/).
 ## [0.19.1] - 2021-04-24
 ### Bugfixes
 - Fix errors caused by old proxy-agent [#564](https://github.com/motdotla/node-lambda/pull/564)
+
+## [0.20.0] - 2021-09-25
+### Features
+- updated proxy-agent to 5.0.0 [#574](https://github.com/motdotla/node-lambda/pull/574)
+- show suggestions after an error for an unknown command or option [#572](https://github.com/motdotla/node-lambda/pull/572)
+- feat: drop nodejs10x from lambda runtime [#571](https://github.com/motdotla/node-lambda/pull/571)
+
+### Bugfixes
+- fix(_uploadExisting): fix function update errors [#575](https://github.com/motdotla/node-lambda/pull/575)
+- test: fix npm install test failing in some cases [#569](https://github.com/motdotla/node-lambda/pull/569)
+- Clean the tmp dir during `_archivePrebuilt` to match `_buildAndArchive` behavior [#518](https://github.com/motdotla/node-lambda/pull/518)
+
+## [0.21.0] - 2021-11-10
+### Features
+- feat: support for yarn [#581](https://github.com/motdotla/node-lambda/pull/581)
+
+## [0.22.0] - 2022-02-17
+### Features
+- Support for Architectures parameter [#591](https://github.com/motdotla/node-lambda/pull/591)
+### Bugfixes
+- fix: skip installing the package, when there is no `package.json` [#589](https://github.com/motdotla/node-lambda/pull/589)

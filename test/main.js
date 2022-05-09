@@ -1,5 +1,6 @@
 'use strict'
 
+const process = require('process')
 const path = require('path')
 const os = require('os')
 const fs = require('fs-extra')
@@ -10,6 +11,7 @@ const awsMock = require('aws-sdk-mock')
 awsMock.setSDK(path.resolve('node_modules/aws-sdk'))
 
 const originalProgram = {
+  packageManager: 'npm',
   environment: 'development',
   accessKey: 'key',
   secretKey: 'secret',
@@ -52,7 +54,7 @@ const lambdaMockSettings = {
   addPermission: {},
   getFunction: {
     Code: {},
-    Configuration: {},
+    Configuration: { LastUpdateStatus: 'Successful' },
     FunctionArn: 'Lambda.getFunction.mock.FunctionArn'
   },
   createFunction: {
@@ -132,8 +134,8 @@ const _awsRestore = () => {
 describe('lib/main', function () {
   if (['win32', 'darwin'].includes(process.platform)) {
     // It seems that it takes time for file operation in Windows and Mac.
-    // So set `timeout(60000)` for the whole test.
-    this.timeout(60000)
+    // So set `timeout(120000)` for the whole test.
+    this.timeout(120000)
   }
 
   let aws = null // mock
@@ -149,7 +151,7 @@ describe('lib/main', function () {
   })
 
   it('version should be set', () => {
-    assert.equal(lambda.version, '0.19.1')
+    assert.equal(lambda.version, '0.22.0')
   })
 
   describe('_codeDirectory', () => {
@@ -590,91 +592,254 @@ describe('lib/main', function () {
     })
   })
 
-  describe('_npmInstall', function () {
+  describe('_getNpmInstallCommand', () => {
+    describe('when package-lock.json exists', () => {
+      const codeDirectory = '.'
+
+      it('npm ci', () => {
+        const { packageManager, installOptions } = lambda._getNpmInstallCommand(program, codeDirectory)
+        assert.equal(packageManager, 'npm')
+        assert.deepEqual(installOptions, ['-s', 'ci', '--production', '--no-audit', '--prefix', codeDirectory])
+      })
+
+      it('npm ci with "--no-optional"', () => {
+        const { packageManager, installOptions } = lambda._getNpmInstallCommand(
+          {
+            ...program,
+            optionalDependencies: false
+          },
+          codeDirectory
+        )
+        assert.equal(packageManager, 'npm')
+        assert.deepEqual(
+          installOptions,
+          ['-s', 'ci', '--production', '--no-audit', '--no-optional', '--prefix', codeDirectory]
+        )
+      })
+
+      it('npm ci on docker', () => {
+        const { packageManager, installOptions } = lambda._getNpmInstallCommand(
+          {
+            ...program,
+            dockerImage: 'test'
+          },
+          codeDirectory
+        )
+        assert.equal(packageManager, 'npm')
+        assert.deepEqual(installOptions, ['-s', 'ci', '--production', '--no-audit'])
+      })
+    })
+
+    describe('when package-lock.json does not exist', () => {
+      const codeDirectory = './test'
+
+      it('npm install', () => {
+        const { packageManager, installOptions } = lambda._getNpmInstallCommand(program, './test')
+        assert.equal(packageManager, 'npm')
+        assert.deepEqual(installOptions, ['-s', 'install', '--production', '--no-audit', '--prefix', './test'])
+      })
+
+      it('npm install with "--no-optional"', () => {
+        const { packageManager, installOptions } = lambda._getNpmInstallCommand(
+          {
+            ...program,
+            optionalDependencies: false
+          },
+          codeDirectory
+        )
+        assert.equal(packageManager, 'npm')
+        assert.deepEqual(
+          installOptions,
+          ['-s', 'install', '--production', '--no-audit', '--no-optional', '--prefix', codeDirectory]
+        )
+      })
+
+      it('npm install on docker', () => {
+        const { packageManager, installOptions } = lambda._getNpmInstallCommand(
+          {
+            ...program,
+            dockerImage: 'test'
+          },
+          codeDirectory
+        )
+        assert.equal(packageManager, 'npm')
+        assert.deepEqual(installOptions, ['-s', 'install', '--production', '--no-audit'])
+      })
+    })
+  })
+
+  describe('_getYarnInstallCommand', () => {
+    const codeDirectory = '.'
+
+    it('yarn install', () => {
+      const { packageManager, installOptions } = lambda._getYarnInstallCommand(program, codeDirectory)
+      assert.equal(packageManager, 'yarn')
+      assert.deepEqual(installOptions, ['-s', 'install', '--production', '--cwd', codeDirectory])
+    })
+
+    it('yarn install with "--no-optional"', () => {
+      const { packageManager, installOptions } = lambda._getYarnInstallCommand(
+        {
+          ...program,
+          optionalDependencies: false
+        },
+        codeDirectory
+      )
+      assert.equal(packageManager, 'yarn')
+      assert.deepEqual(
+        installOptions,
+        ['-s', 'install', '--production', '--ignore-optional', '--cwd', codeDirectory]
+      )
+    })
+
+    it('yarn install on docker', () => {
+      const { packageManager, installOptions } = lambda._getYarnInstallCommand(
+        {
+          ...program,
+          dockerImage: 'test'
+        },
+        codeDirectory
+      )
+      assert.equal(packageManager, 'yarn')
+      assert.deepEqual(installOptions, ['-s', 'install', '--production'])
+    })
+  })
+
+  describe('_packageInstall', function () {
     _timeout({ this: this, sec: 60 }) // ci should be faster than install
 
     // npm treats files as packages when installing, and so removes them.
     // Test with `devDependencies` packages that are not installed with the `--production` option.
     const nodeModulesMocha = path.join(codeDirectory, 'node_modules', 'mocha')
 
+    const testCleanAndInstall = async (packageManager) => {
+      const beforeAwsSdkStat = fs.statSync(path.join(codeDirectory, 'node_modules', 'aws-sdk'))
+
+      const usedPackageManager = await lambda._packageInstall(
+        {
+          ...program,
+          packageManager
+        },
+        codeDirectory
+      )
+      assert.equal(usedPackageManager, packageManager)
+
+      const contents = fs.readdirSync(path.join(codeDirectory, 'node_modules'))
+      assert.include(contents, 'dotenv')
+
+      // To remove and then install.
+      // beforeAwsSdkStat.ctimeMs < afterAwsSdkStat.ctimeMs
+      const afterAwsSdkStat = fs.statSync(path.join(codeDirectory, 'node_modules', 'aws-sdk'))
+      assert.isBelow(beforeAwsSdkStat.ctimeMs, afterAwsSdkStat.ctimeMs)
+
+      // Not installed with the `--production` option.
+      assert.isFalse(fs.existsSync(nodeModulesMocha))
+    }
+
+    const beforeEachOptionalDependencies = () => {
+      const packageJsonPath = path.join(codeDirectory, 'package.json')
+      const packageJson = require(packageJsonPath)
+      packageJson.optionalDependencies = { npm: '*' }
+      fs.writeFileSync(packageJsonPath, JSON.stringify(packageJson))
+
+      // Remove package-lock.json because it does not match the package.json to which optionalDependencies was added.
+      fs.removeSync(path.join(codeDirectory, 'package-lock.json'))
+    }
+
+    const testOptionalDependenciesIsInstalled = async (packageManager) => {
+      const usedPackageManager = await lambda._packageInstall(
+        {
+          ...program,
+          packageManager
+        },
+        codeDirectory
+      )
+      assert.equal(usedPackageManager, packageManager)
+
+      const contents = fs.readdirSync(path.join(codeDirectory, 'node_modules'))
+      assert.include(contents, 'npm')
+    }
+
+    const testOptionalDependenciesIsNotInstalled = async (packageManager) => {
+      const params = {
+        ...program,
+        packageManager,
+        optionalDependencies: false
+      }
+      const usedPackageManager = await lambda._packageInstall(params, codeDirectory)
+      assert.equal(usedPackageManager, packageManager)
+
+      const contents = fs.readdirSync(path.join(codeDirectory, 'node_modules'))
+      assert.notInclude(contents, 'npm')
+    }
+
     beforeEach(async () => {
       await lambda._cleanDirectory(codeDirectory)
       await lambda._fileCopy(program, '.', codeDirectory, false)
     })
 
-    describe('when package-lock.json does exist', () => {
-      it('should use "npm ci"', () => {
-        const beforeAwsSdkStat = fs.statSync(path.join(codeDirectory, 'node_modules', 'aws-sdk'))
-        return lambda._npmInstall(program, codeDirectory).then(() => {
-          const contents = fs.readdirSync(path.join(codeDirectory, 'node_modules'))
-          assert.include(contents, 'dotenv')
+    describe('Use npm', () => {
+      describe('when package-lock.json does exist', () => {
+        it('should use "npm ci"', () => testCleanAndInstall('npm'))
+      })
 
-          // To remove and then install.
-          // beforeAwsSdkStat.ctimeMs < afterAwsSdkStat.ctimeMs
-          const afterAwsSdkStat = fs.statSync(path.join(codeDirectory, 'node_modules', 'aws-sdk'))
-          assert.isBelow(beforeAwsSdkStat.ctimeMs, afterAwsSdkStat.ctimeMs)
-
-          // Not installed with the `--production` option.
-          assert.isFalse(fs.existsSync(nodeModulesMocha))
+      describe('when package-lock.json does not exist', () => {
+        beforeEach(() => {
+          return fs.removeSync(path.join(codeDirectory, 'package-lock.json'))
         })
-      })
-    })
 
-    describe('when package-lock.json does not exist', () => {
-      beforeEach(() => {
-        return fs.removeSync(path.join(codeDirectory, 'package-lock.json'))
-      })
+        it('should use "npm install"', () => {
+          const beforeAwsSdkStat = fs.statSync(path.join(codeDirectory, 'node_modules', 'aws-sdk'))
+          return lambda._packageInstall(program, codeDirectory).then((usedPackageManager) => {
+            assert.equal(usedPackageManager, 'npm')
 
-      it('should use "npm install"', () => {
-        const beforeAwsSdkStat = fs.statSync(path.join(codeDirectory, 'node_modules', 'aws-sdk'))
-        return lambda._npmInstall(program, codeDirectory).then(() => {
-          const contents = fs.readdirSync(path.join(codeDirectory, 'node_modules'))
-          assert.include(contents, 'dotenv')
-
-          // Installed packages will remain intact.
-          // beforeAwsSdkStat.ctimeMs === afterAwsSdkStat.ctimeMs
-          const afterAwsSdkStat = fs.statSync(path.join(codeDirectory, 'node_modules', 'aws-sdk'))
-          assert.equal(beforeAwsSdkStat.ctimeMs, afterAwsSdkStat.ctimeMs)
-
-          // Not installed with the `--production` option.
-          assert.isFalse(fs.existsSync(nodeModulesMocha))
-        })
-      })
-    })
-
-    describe('optionalDependencies', () => {
-      beforeEach(() => {
-        const packageJsonPath = path.join(codeDirectory, 'package.json')
-        const packageJson = require(packageJsonPath)
-        packageJson.optionalDependencies = { npm: '*' }
-        fs.writeFileSync(packageJsonPath, JSON.stringify(packageJson))
-      })
-
-      describe('No `--no-optionalDependencies`', () => {
-        it('optionalDependencies is installed', () => {
-          return lambda._npmInstall(program, codeDirectory).then(() => {
             const contents = fs.readdirSync(path.join(codeDirectory, 'node_modules'))
-            assert.include(contents, 'npm')
+            assert.include(contents, 'dotenv')
+
+            // Installed packages will remain intact.
+            // beforeAwsSdkStat.ctimeMs === afterAwsSdkStat.ctimeMs
+            const afterAwsSdkStat = fs.statSync(path.join(codeDirectory, 'node_modules', 'aws-sdk'))
+            assert.equal(beforeAwsSdkStat.ctimeMs, afterAwsSdkStat.ctimeMs)
+
+            // Not installed with the `--production` option.
+            assert.isFalse(fs.existsSync(nodeModulesMocha))
           })
         })
       })
 
-      describe('With `--no-optionalDependencies`', () => {
-        it('optionalDependency is NOT installed', () => {
-          const params = {
-            ...program,
-            optionalDependencies: false
-          }
-          return lambda._npmInstall(params, codeDirectory).then(() => {
-            const contents = fs.readdirSync(path.join(codeDirectory, 'node_modules'))
-            assert.notInclude(contents, 'npm')
-          })
+      describe('optionalDependencies', () => {
+        beforeEach(beforeEachOptionalDependencies)
+
+        describe('No `--no-optionalDependencies`', () => {
+          it('optionalDependencies is installed', () => testOptionalDependenciesIsInstalled('npm'))
+        })
+
+        describe('With `--no-optionalDependencies`', () => {
+          it('optionalDependency is NOT installed', () => testOptionalDependenciesIsNotInstalled('npm'))
+        })
+      })
+    })
+
+    describe('Use yarn', () => {
+      it('should use "yarn install"', () => testCleanAndInstall('yarn'))
+
+      describe('optionalDependencies', () => {
+        beforeEach(beforeEachOptionalDependencies)
+
+        describe('No `--ignore-optionalDependencies`', () => {
+          it('optionalDependencies is installed', () => testOptionalDependenciesIsInstalled('yarn'))
+        })
+
+        describe('With `--ignore-optionalDependencies`', () => {
+          it('optionalDependency is NOT installed', () => testOptionalDependenciesIsNotInstalled('yarn'))
         })
       })
     })
   })
 
-  describe('_npmInstall (When codeDirectory contains characters to be escaped)', () => {
+  describe('_packageInstall (When codeDirectory contains characters to be escaped)', function () {
+    _timeout({ this: this, sec: 30 }) // give it time to build the node modules
+
     beforeEach(() => {
       // Since '\' can not be included in the file or directory name in Windows
       const directoryName = process.platform === 'win32'
@@ -691,14 +856,21 @@ describe('lib/main', function () {
       codeDirectory = lambda._codeDirectory()
     })
 
-    it('_npm adds node_modules', function () {
-      _timeout({ this: this, sec: 30 }) // give it time to build the node modules
+    const testFunc = async (packageManager) => {
+      const usedPackageManager = await lambda._packageInstall(
+        {
+          ...program,
+          packageManager
+        },
+        codeDirectory
+      )
+      assert.equal(usedPackageManager, packageManager)
+      const contents = fs.readdirSync(codeDirectory)
+      assert.include(contents, 'node_modules')
+    }
 
-      return lambda._npmInstall(program, codeDirectory).then(() => {
-        const contents = fs.readdirSync(codeDirectory)
-        assert.include(contents, 'node_modules')
-      })
-    })
+    it('npm adds node_modules', () => testFunc('npm'))
+    it('yarn adds node_modules', () => testFunc('yarn'))
   })
 
   describe('_postInstallScript', () => {
@@ -768,53 +940,70 @@ describe('lib/main', function () {
     })
   })
 
-  describe('_zip', () => {
-    beforeEach(function () {
-      _timeout({ this: this, sec: 30 }) // give it time to build the node modules
-      return Promise.resolve().then(() => {
-        return lambda._cleanDirectory(codeDirectory)
-      }).then(() => {
-        return lambda._fileCopy(program, '.', codeDirectory, true)
-      }).then(() => {
-        return lambda._npmInstall(program, codeDirectory)
-      }).then(() => {
-        if (process.platform !== 'win32') {
-          fs.symlinkSync(
-            path.join(__dirname, '..', 'bin', 'node-lambda'),
-            path.join(codeDirectory, 'node-lambda-link')
-          )
-        }
-      })
+  describe('_zip', function () {
+    _timeout({ this: this, sec: 60 }) // give it time to zip
+
+    const beforeTask = async (packageManager) => {
+      await lambda._cleanDirectory(codeDirectory)
+      await lambda._fileCopy(program, '.', codeDirectory, true)
+      const usedPackageManager = await lambda._packageInstall(
+        {
+          ...program,
+          packageManager
+        },
+        codeDirectory
+      )
+      assert.equal(usedPackageManager, packageManager)
+      if (process.platform !== 'win32') {
+        fs.symlinkSync(
+          path.join(__dirname, '..', 'bin', 'node-lambda'),
+          path.join(codeDirectory, 'node-lambda-link')
+        )
+      }
+    }
+
+    const testFunc = async (packageManager) => {
+      // setup
+      await beforeTask(packageManager)
+
+      // tests
+      const data = await lambda._zip(program, codeDirectory)
+      const archive = new Zip(data)
+      assert.include(archive.files['index.js'].name, 'index.js')
+      assert.include(archive.files['bin/node-lambda'].name, 'bin/node-lambda')
+
+      if (process.platform !== 'win32') {
+        const indexJsStat = fs.lstatSync('index.js')
+        const binNodeLambdaStat = fs.lstatSync(path.join('bin', 'node-lambda'))
+        assert.equal(
+          archive.files['index.js'].unixPermissions,
+          indexJsStat.mode
+        )
+        assert.equal(
+          archive.files['bin/node-lambda'].unixPermissions,
+          binNodeLambdaStat.mode
+        )
+
+        // isSymbolicLink
+        assert.include(archive.files['node-lambda-link'].name, 'node-lambda-link')
+        assert.equal(
+          archive.files['node-lambda-link'].unixPermissions & fs.constants.S_IFMT,
+          fs.constants.S_IFLNK
+        )
+      }
+    }
+
+    describe('Use npm', () => {
+      it(
+        'Compress the file. `index.js` and `bin/node-lambda` are included and the permission is also preserved.',
+        () => testFunc('npm')
+      )
     })
-
-    it('Compress the file. `index.js` and `bin/node-lambda` are included and the permission is also preserved.', function () {
-      _timeout({ this: this, sec: 30 }) // give it time to zip
-
-      return lambda._zip(program, codeDirectory).then((data) => {
-        const archive = new Zip(data)
-        assert.include(archive.files['index.js'].name, 'index.js')
-        assert.include(archive.files['bin/node-lambda'].name, 'bin/node-lambda')
-
-        if (process.platform !== 'win32') {
-          const indexJsStat = fs.lstatSync('index.js')
-          const binNodeLambdaStat = fs.lstatSync(path.join('bin', 'node-lambda'))
-          assert.equal(
-            archive.files['index.js'].unixPermissions,
-            indexJsStat.mode
-          )
-          assert.equal(
-            archive.files['bin/node-lambda'].unixPermissions,
-            binNodeLambdaStat.mode
-          )
-
-          // isSymbolicLink
-          assert.include(archive.files['node-lambda-link'].name, 'node-lambda-link')
-          assert.equal(
-            archive.files['node-lambda-link'].unixPermissions & fs.constants.S_IFMT,
-            fs.constants.S_IFLNK
-          )
-        }
-      })
+    describe('Use yarn', () => {
+      it(
+        'Compress the file. `index.js` and `bin/node-lambda` are included and the permission is also preserved.',
+        () => testFunc('yarn')
+      )
     })
   })
 
