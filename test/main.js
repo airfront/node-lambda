@@ -22,7 +22,7 @@ const originalProgram = {
   memorySize: 128,
   timeout: 3,
   description: '',
-  runtime: 'nodejs14.x',
+  runtime: 'nodejs16.x',
   deadLetterConfigTargetArn: '',
   tracingConfig: '',
   Layers: '',
@@ -151,7 +151,7 @@ describe('lib/main', function () {
   })
 
   it('version should be set', () => {
-    assert.equal(lambda.version, '0.22.0')
+    assert.equal(lambda.version, '1.0.0')
   })
 
   describe('_codeDirectory', () => {
@@ -459,7 +459,6 @@ describe('lib/main', function () {
 
   describe('_fileCopy', () => {
     before(() => {
-      fs.mkdirSync('build')
       fs.mkdirsSync(path.join('__unittest', 'hoge'))
       fs.mkdirsSync(path.join('__unittest', 'fuga'))
       fs.writeFileSync(path.join('__unittest', 'hoge', 'piyo'), '')
@@ -467,7 +466,7 @@ describe('lib/main', function () {
       fs.writeFileSync('fuga', '')
     })
     after(() => {
-      ['build', 'fuga', '__unittest'].forEach((path) => {
+      ['fuga', '__unittest'].forEach((path) => {
         fs.removeSync(path)
       })
     })
